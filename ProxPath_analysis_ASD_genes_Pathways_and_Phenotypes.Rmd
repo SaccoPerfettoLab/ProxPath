@@ -1,0 +1,184 @@
+---
+title: "ProxPath analysis (SFARI lists)"
+author: "Livia Perfetto"
+date: "24/08/2023"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### this code perform a ProxPasth analysis with Phenotypes and Pathways using SFARI1 and Pintacuda-defines ASD genes as INPUT.
+
+
+
+#### IMPORT Libraries
+```{r message=FALSE,warning=FALSE}
+
+setwd("./")
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(tidyverse)
+
+```
+
+
+#### Import ProxPath functions
+```{r message=FALSE,warning=FALSE}
+
+source('ProxPath_functions/ProxPath_PHENOTYPES_FUNCTION.R')
+
+source('ProxPath_functions/ProxPath_PATHWAY_FUNCTION.R')
+
+```
+
+
+### import data to analyse: SFARI1 proteins and Pintacuda proteins
+
+```{r message=FALSE,warning=FALSE, echo = FALSE}
+## define enrichment datasets: SFARI1 proteins:
+##SFARI
+
+sfari_file <- './input_tables/SFARI_Feb2021.txt'
+SFARI <- read.csv(sfari_file, sep='\t', header = T)
+SFARI1 <- SFARI%>%filter (in.SFARI == 'yes' & gene.score%in% c(1) & resource.count >0) ##analysis solo SFARI = 1
+
+## Pintacuda et al, IP-MS ASD genes interactors
+
+Pintacuda_file <- 'input_tables/Pintacuda_et_al_SupplementaryTable3.xlsx'
+
+Pintacuda<- read_excel(Pintacuda_file, sheet = 3)
+unique(Pintacuda$`Index protein`) -> bait
+
+Pintacuda_shared_all <- read_excel(Pintacuda_file, sheet = 4)
+
+Pintacuda_shared_all%>%
+  filter(as.numeric(`# of index proteins`) == 1 )-> Pintacuda_unique
+
+Pintacuda_shared_all%>%
+  filter(as.numeric(`# of index proteins`) >= 2 )-> Pintacuda_shared
+
+list_of_list_Pintacuda <- c('Pintacuda_unique', 'Pintacuda_shared')
+list_of_list_Pintacuda <- c('Pintacuda_shared')
+
+## to reproduce Enrichment analysis performed in Pintacuda et al we use as backgroun expressed protein in brain
+## SynGO expressed proteins, for background
+
+
+brain_expressed <- readxl::read_excel('input_tables/SynGOBrainExpressed.xlsx', 
+                                      col_types = c('text'), 
+                                      col_names = c('HCGN_id'),
+                                      skip = 1)
+
+
+HCGN_query <- 'https://www.genenames.org/cgi-bin/download/custom?col=gd_hgnc_id&col=gd_app_sym&col=gd_app_name&col=gd_status&col=gd_prev_sym&col=gd_aliases&col=gd_pub_chrom_map&col=gd_pub_acc_ids&col=gd_pub_refseq_ids&status=Approved&status=Entry%20Withdrawn&hgnc_dbtag=on&order_by=gd_app_sym_sort&format=text&submit=submit'
+HCGN_mapping <- as.data.frame(fread(HCGN_query))
+HCGN_mapping%>%
+  filter(Status == 'Approved') -> HCGN_mapping
+
+inner_join(x = brain_expressed,
+      y = HCGN_mapping,
+      c('HCGN_id' = 'HGNC ID')) -> brain_expressed_mapped
+
+```
+
+
+########################
+## PHENOTYPE ANALYSIS ##
+########################
+
+```{r message=FALSE,warning=FALSE, echo = FALSE}
+
+table.zscore.filtered.phenotypes <- ProxPath_Phenotypes_parse_distance_table(
+  save_directory = './results_ProxPath_function/Phenotypes/' 
+)
+
+table.zscore.filtered.phenotypes <- read_delim('./results_ProxPath_function/Phenotypes/significant_paths_to_phenotypes.txt', 
+                                               delim = '\t',
+                                               show_col_types = F)
+
+## how many targets are reached in the analysis
+table.zscore.filtered.phenotypes%>%
+  dplyr::group_by(EndNode, EndPathways) %>%
+  dplyr::summarise(total_path = n())->summary.end.nodes
+
+## how nodes can reach the targets in the analysis
+table.zscore.filtered.phenotypes%>%
+  dplyr::group_by(QueryNode) %>%
+  dplyr::summarise(total_path = n())->summary.query.nodes
+
+#### RUN ENRICHMENT ANALYSIS FOR SFARI 1 proteins
+
+SFARI1_phenotypes_results <- ProxPath_Phenotypes_enrichment(
+  save_tables = TRUE,
+  parsed_distance_file_phenotypes = table.zscore.filtered.phenotypes,
+  analysis_name = 'SFARI1',
+  input_list =  c('SFARI1'),
+  save_directory = './results_ProxPath_function/Phenotypes/' )
+
+#### RUN ENRICHMENT ANALYSIS FOR Pintacuda shared proteins
+
+Pintacuda_phenotypes_results <- ProxPath_Phenotypes_enrichment(
+  save_tables = TRUE,
+  parsed_distance_file_phenotypes = table.zscore.filtered.phenotypes,  
+  analysis_name = 'Pintacuda',
+  input_list =  list_of_list_Pintacuda,
+  # background = brain_expressed_mapped$`Approved symbol`,
+  num_randomization = 5,
+  save_directory = './results_ProxPath_function/Phenotypes/' )
+
+View(Pintacuda_phenotypes_results)
+```
+
+### Pathway analysis randomized
+```{r bins.per.pair}
+
+######################
+## PATHWAY ANALYSIS ##
+######################
+
+
+table.zscore.filtered.pathways <- ProxPath_Pathways_parse_distance_table(
+  expansion = FALSE,
+  save_directory = './results_ProxPath_function/Pathways/' 
+)
+
+table.zscore.filtered.pathways <- read_delim('./results_ProxPath_function/Pathways/significant_paths_to_phenotypes.txt', 
+                                               delim = '\t',
+                                               show_col_types = F)
+
+## how many targets are reached in the analysis
+table.zscore.filtered.pathways%>%
+  dplyr::group_by(EndNode, EndPathways) %>%
+  dplyr::summarise(total_path = n()) -> summary.end.nodes
+
+## how nodes can reach the targets in the analysis
+table.zscore.filtered.pathways%>%
+  dplyr::group_by(QueryNode) %>%
+  dplyr::summarise(total_path = n()) -> summary.query.nodes
+
+#### RUN ENRICHMENT ANALYSIS FOR SFARI 1 proteins
+
+SFARI1_pathways_results <- ProxPath_Pathways_enrichment(
+  parsed_distance_file = table.zscore.filtered.pathways,
+  analysis_name = 'SFARI1',
+  input_list =  c('SFARI1'),
+  save_tables = TRUE,
+  save_directory = './results_ProxPath_function/Pathways/' )
+
+#### RUN ENRICHMENT ANALYSIS Pintacuda shared proteins
+
+Pintacuda_pathways_results <- ProxPath_Pathways_enrichment(
+  parsed_distance_file = table.zscore.filtered.pathways,  
+  analysis_name = 'Pintacuda',
+  input_list =  list_of_list_Pintacuda,
+  background = brain_expressed_mapped$`Approved symbol`,
+  save_tables = TRUE,
+  save_directory = './results_ProxPath_function/Pathways/' )
+
+
+```
+

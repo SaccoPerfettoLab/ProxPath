@@ -1,0 +1,229 @@
+---
+title: "ProxPath analysis (SFARI lists)"
+author: "Livia Perfetto"
+date: "24/08/2023"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### this code generates a ranked list of proteins based on the 'vicinity' to SFARI1 proteins
+
+
+
+#### IMPORT Libraries
+```{r message=FALSE,warning=FALSE}
+
+setwd("./")
+
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(tidyverse)
+library(writexl)
+library(org.Hs.eg.db)
+library(fgsea)
+library(tibble)
+
+```
+
+
+#### Import ProxPath functions
+```{r message=FALSE,warning=FALSE}
+
+source('ProxPath_functions/ProxPath_SFARI1.R')
+
+
+```
+
+
+### import data to analyse: SFARI1 proteins and Pintacuda proteins
+
+```{r message=FALSE,warning=FALSE, echo = FALSE}
+## arrange SIGNOR proteome by distance to SFARI1
+
+ranking_SFARI <- ProxPath_SFARI1_arrange_by_distance_table(
+  Path_Length_threshold = 4,
+  save_directory = './results_ProxPath_function/SFARI1/' )
+
+
+```
+
+### import gene lists to build gene sets
+```{r bins.per.pair}
+
+##SFARI1 proteins:
+##SFARI
+
+sfari_file <- './input_tables/SFARI_Feb2021.txt'
+
+SFARI <- read.csv(sfari_file, sep='\t', header = T)
+
+SFARI_1 <- SFARI%>%filter (in.SFARI == 'yes' & gene.score%in% c(1) & resource.count >0) 
+
+SFARI_2 <- SFARI%>%filter (in.SFARI == 'yes' & gene.score%in% c(2) & resource.count >0) 
+
+SFARI_3 <- SFARI%>%filter (in.SFARI == 'yes' & gene.score%in% c(3) & resource.count >0) 
+
+SFARI_S <- SFARI%>%filter (in.SFARI == 'yes' & gene.score%in% c(NA) & resource.count >0) 
+
+## Pintacuda et al, IP-MS ASD genes interactors
+
+Pintacuda_file <- 'input_tables/Pintacuda_et_al_SupplementaryTable3.xlsx'
+
+Pintacuda_shared_all <- read_excel(Pintacuda_file, sheet = 4)
+
+Pintacuda_shared_all%>%
+  filter(as.numeric(`# of index proteins`) == 1 )-> Pintacuda_unique
+
+Pintacuda_shared_all%>%
+  filter(as.numeric(`# of index proteins`) >= 2 )-> Pintacuda_shared
+
+### PCMI ASD genes
+
+read_xlsx('input_tables/all_NDD.xlsx', 
+          sheet = 1, 
+          range = NULL, 
+          col_names = TRUE,
+          col_types = NULL, 
+          na = "", 
+          trim_ws = TRUE, 
+          skip = 0,
+          progress = readxl_progress(), .name_repair = "unique")-> NDD
+
+NDD%>%
+  filter(Disease == 'ASD') -> PCMI_ASD
+
+### ASC independently defined ASD genes
+
+ASC_file = './input_tables/ASC_gene_results'
+
+read.csv(ASC_file, header = T, sep = '\t') -> ASC
+
+ASC %>%
+  filter(grepl('ENS', gene_id) & qval < 0.05) -> ASC
+
+ASC$SYMBOL <- AnnotationDbi::mapIds(org.Hs.eg.db, 
+                      keys = ASC$gene_id,
+                      keytype = 'ENSEMBL',
+                      column = 'SYMBOL')
+
+signor_data_original = as.data.frame(fread(paste0('https://signor.uniroma2.it/getData.php?'), header=F))
+
+proteinsA = signor_data_original$V1[which(signor_data_original$V2=='protein')]
+
+proteinsB = signor_data_original$V5[which(signor_data_original$V6=='protein')]
+
+all.signor.id = c(proteinsA,proteinsB)
+
+all.signor.id <- unique(all.signor.id)
+
+all.signor.id
+```
+
+
+# define gene sets for gsea over ranked proteins 
+```{r bins.per.pair}
+pathways <- list(
+  ASC_significant = ASC$SYMBOL,
+  PCMI_ASD = PCMI_ASD$Gene,
+  SFARI_1 = SFARI_1$gene.name,
+  SFARI_2 = SFARI_2$gene.name,
+  SFARI_3 = SFARI_3$gene.name,
+  random = sample(all.signor.id, size = 100),
+  Pintacuda_shared = unique(Pintacuda_shared$Interactor),
+  Pintacuda_unique = unique(Pintacuda_unique$Interactor)
+)  
+
+```
+
+
+### perform gsea using defined gene sets over ranked genes
+```{r bins.per.pair}
+ranking_SFARI%>%
+  dplyr::select(QueryNode, Path_Score)-> ranking_SFARI_slim
+
+colnames(ranking_SFARI_slim) <- c('gene.name','distance.score')
+
+ranking_SFARI_slim$distance.score <- -(ranking_SFARI_slim$distance.score- mean(ranking_SFARI_slim$distance.score))/sd(ranking_SFARI_slim$distance.score)
+
+ranking_SFARI_slim <- as.tibble(ranking_SFARI_slim)
+
+ranking_SFARI_slim <- drop_na(ranking_SFARI_slim)
+
+
+ranking_SFARI_slim_or <- ranking_SFARI_slim %>% 
+  arrange(distance.score) 
+
+ranking_SFARI_slim_or -> ranking_SFARI_slim_or_bkup
+
+ranking_SFARI_slim_or$gene.name <- NULL
+rownames(ranking_SFARI_slim_or) = ranking_SFARI_slim_or_bkup$gene.name
+
+    
+# Convert ranked proteins into a format required for fgsea
+gene_expression_list <- as.numeric(ranking_SFARI_slim_or$distance.score)
+names(gene_expression_list) <- rownames(ranking_SFARI_slim_or)
+
+
+
+
+results <- fgseaSimple(pathways, 
+                       gene_expression_list, 
+                       scoreType = 'pos',
+                       nperm = 1000)
+
+# ggpubr::ggdensity(gene_expression_list)
+results%>%
+  filter(padj < 0.05)-> results_filt
+
+
+for (i in c(1: nrow(results))){
+  results$leadingEdge[i] <- paste0(as.vector(results$leadingEdge[i])[[1]], collapse = ', ')
+}
+
+## extract leading edges
+
+results$leadingEdge <- unlist(results$leadingEdge)
+
+results$padj <- round(results$padj, 4)
+
+results$NES <- round(results$NES, 4 )
+
+write_xlsx (results, 'results_gsea/results_gsea.xlsx' , col_names = T)
+
+p1 <- plotEnrichment(pathways[["Pintacuda_shared"]], gene_expression_list)
+
+p1
+
+p2 <- plotEnrichment(pathways[["ASC_significant"]], gene_expression_list)
+
+p3 <- plotEnrichment(pathways[["PCMI_ASD"]], gene_expression_list)
+
+ggsave('results_gsea/Pintacuda_shared.pdf',
+       plot = p1,
+       device = 'pdf',
+       width = 10,
+       height = 5,
+       units = 'cm')
+
+ggsave('results_gsea/ASC_significant.pdf',
+       plot = p2,
+       device = 'pdf',
+       width = 10,
+       height = 5,
+       units = 'cm')
+
+ggsave('results_gsea/ASD_PCMI.pdf',
+       plot = p3,
+       device = 'pdf',
+       width = 10,
+       height = 5,
+       units = 'cm')
+ 
+results_filt$pathway
+```
+

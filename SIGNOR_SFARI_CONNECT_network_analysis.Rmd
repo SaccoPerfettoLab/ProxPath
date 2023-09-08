@@ -1,0 +1,347 @@
+---
+title: "Network analysis signor (SFARI lists)"
+author: "Livia Perfetto"
+date: "24/03/2022"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### this code perform a 'CONNECT' search in SIGNOR for SFARI proteins as INPUT,
+#### it measures the significance of the level of connectivity by comparing it with 1000 Networks randomized with BeRewire
+#### it preforms KEGG ORA analysis on it
+#### it performs community detection analysis using WalkTrap method
+#### it perform KEGG and GO:BP ORA over the communitieis detected
+
+
+
+#### IMPORT Libraries
+```{r message=FALSE,warning=FALSE}
+setwd("./")
+library(RCy3)
+library(igraph)
+library(data.table)
+library(httr) 
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library (BiRewire)
+library(writexl)
+library(gprofiler2)
+```
+
+
+#### Define functions
+```{r message=FALSE,warning=FALSE}
+
+metrics_all<-function(graph, graph_name, list){
+  genes_count <- length (V(graph)[which (V(graph)$name %in% list)])
+      comp = components(graph)
+      count_nodes = vcount(graph)
+      count_edges = ecount(graph)
+      numb_comp = max(comp$membership) #this return the number of components of the graph
+      degree = mean(degree(graph))
+      diameter= diameter(graph)
+      clustering_coefficient = mean(transitivity(graph))
+      betw_nodes = mean(betweenness(graph))
+      betw_edges = mean(edge_betweenness(graph))
+      row_metriche = data.frame('Resource' = graph_name,
+                                'NetworkMethod' = 'connect',
+                                'genes'= genes_count,
+                                'genes_tot' = length(list),
+                                'genes_perc' = round(genes_count/length(list)*100,0),
+                                'NumComp' = numb_comp,
+                                'Edges' = count_edges,
+                                'Nodes' = count_nodes,
+                                'AvDegree' = degree,
+                                'Diameter' = diameter,
+                                'AvClusterCoefficient' = clustering_coefficient,
+                                'AvNodeBetwenness' = betw_nodes,
+                                'AvEdgeBetwennes' = betw_edges
+                                )
+      
+    return(row_metriche)  
+}      
+
+calculate_pvalue<-function(Hits, tot.Hits, pop, tot.pop){
+  prop.test(x = c(Hits, tot.Hits), n = c(pop, tot.pop))-> prop.res
+  return(prop.res$p.value)}
+
+
+calculate_pvalue_ttest<-function(Hits, tot.Hits, pop, tot.pop){
+  prop.test(x = c(Hits, tot.Hits), n = c(pop, tot.pop))-> prop.res
+  return(prop.res$p.value)}
+
+
+calculate_JI <- function(g1,g2){
+  graph.intersection(g1, g2) -> g_intersection
+  graph.union (g1,g2) -> g_union
+   JI <- length(E(g_intersection))/length(E(g_union))
+   return(JI)
+}
+
+```
+
+
+### import SIGNOR data
+
+```{r message=FALSE,warning=FALSE, echo = FALSE}
+###get network and header from signor
+
+
+result <- GET('https://signor.uniroma2.it/getData.php?')
+content(result) -> file_signor # automatically parses JSON
+signor <- read_tsv(file_signor, skip_empty_rows = TRUE)
+
+signor <- signor [, 1:28]
+
+colnames(signor) <- c("ENTITYA" ,"TYPEA" ,"IDA" ,"DATABASEA" ,"ENTITYB" ,"TYPEB" ,"IDB" ,"DATABASEB" ,"EFFECT" ,"MECHANISM" ,"RESIDUE" ,"SEQUENCE" ,"TAX_ID" ,"CELL_DATA" ,"TISSUE_DATA" ,"MODULATOR_COMPLEX","TARGET_COMPLEX" ,"MODIFICATIONA" ,"MODASEQ" ,"MODIFICATIONB" ,"MODBSEQ" ,"PMID" ,"DIRECT" ,"NOTES" ,"ANNOTATOR" ,"SENTENCE" ,"SIGNOR_ID","SCORE")
+
+## parse and simplify EFFECT column
+signor$EFFECT_CLEAN <- 'unk'
+signor$EFFECT_CLEAN[grep('up',signor$EFFECT)] <- '+'
+signor$EFFECT_CLEAN[grep('form',signor$EFFECT)] <- '+'
+signor$EFFECT_CLEAN[grep('down',signor$EFFECT)] <- '-'
+
+## remove interactions with unknown effect
+signor %>%
+  dplyr::filter(EFFECT_CLEAN != 'unk') -> signor
+
+## create a dataframe for graph import named signor_PPI
+signor_ppi = data.frame('IDA' = signor$ENTITYA, 'IDB' = signor$ENTITYB, 'PMID' = signor$PMID, 'MECH' = signor$MECHANISM, 'EFFECT' = signor$EFFECT_CLEAN, 'weight' = signor$SCORE)
+
+signor_ppi$IDA <- gsub(pattern = ' ', replacement = '_', x=signor_ppi$IDA )
+signor_ppi$IDB <- gsub(pattern = ' ', replacement = '_', x=signor_ppi$IDB )
+```
+
+
+###START ANALYSIS IN THE CONTEXT OF NEURO
+
+### import sfari genes
+```{r message=FALSE,warning=FALSE, echo = FALSE}
+
+sfari_file <- './input_tables/SFARI_Feb2021.txt'
+sfari <- read_delim(sfari_file, delim='\t')
+sfari %>%
+  filter(in.SFARI == 'yes')-> sfari
+
+```
+
+
+### create subnetworks of SIGNOR, for specific lists for SFARI we use 'CONNECT'
+###NEW
+
+```{r bins.per.pair}
+signor_ppi %>%
+  select (IDA,  IDB , EFFECT, weight) -> test_dsg_signor
+test_dsg_signor <- drop_na(test_dsg_signor)
+
+test_dsg_signor %>%
+  filter (IDA %in% sfari$gene.name & IDB %in% sfari$gene.name )-> test_dsg_signor_SFARI ## CONNECT mode
+
+### KEGG ORA Analysis of CONNECT network
+go_result <- gost(query = c(test_dsg_signor_SFARI$IDA, test_dsg_signor_SFARI$IDB),
+                      organism = 'hsapiens',
+                      multi_query = FALSE,
+                      ordered_query = FALSE,
+                      significant = TRUE,
+                      exclude_iea = TRUE,
+                      user_threshold = 0.05,
+                      evcodes = FALSE,
+                      correction_method = 'bonferroni',
+                      sources = c('KEGG'))
+
+result_go_df <- go_result$result
+    
+
+## clean the results table
+result_go_df%>%
+  dplyr::select(-parents)-> result_go_df 
+
+result_go_df[is.na(result_go_df)] <- '-'
+
+result_go_df[is.null(result_go_df)] <- '-'
+
+writexl::write_xlsx(as.data.frame(result_go_df), 
+           'results_CONNECT_analysis/Supplementary_Table1_KEGG_ORA_CONNECT.xlsx')
+
+
+    
+## import as a graph object
+graph_signor_SFARI = graph_from_data_frame(test_dsg_signor_SFARI, directed = TRUE) 
+
+## remove loops and multiple edges from the graph object
+graph_signor_SFARI = igraph::simplify(graph_signor_SFARI, 
+                                     remove.multiple = TRUE, 
+                                     remove.loops = TRUE,
+                                     edge.attr.comb = 'first')
+
+## extract graph metrics
+metrics_signor <- metrics_all (graph_signor_SFARI, 'signor', sfari$gene.name )
+
+```
+
+### analisi randomizzata 1000 reti da SIGNOR per NDD
+```{r bins.per.pair}
+metrics_random_tot_signor <- metrics_signor[0,]
+
+## create bipartite network of SIGNOR for the randomization with BiRewire 
+test_dsg_signor%>%
+  dplyr::select(IDA, EFFECT, IDB) -> test_dsg_signor_BR
+test_dsg_signor_BR$weight <- NULL
+
+dsg_signor = BiRewire::birewire.induced.bipartite(test_dsg_signor_BR)
+
+
+##use BiRewire to create 1000 (see k pparameter) randomized networks
+k=1000
+birewire.sampler.dsg(dsg_signor,
+                     K = k,
+                     path = 'results_test_rand',
+                     delimitators=list(negative='-',positive='+'),
+                     exact=TRUE,
+                     verbose=FALSE, 
+                     max.iter.pos='n',
+                     max.iter.neg='n', 
+                     accuracy=0.00005,
+                     MAXITER_MUL=100)
+
+path_file_sif='results_test_rand/1/network_'
+
+## calculate graph metrics for the randomized networks
+
+for (i in c(1:k)){
+  file_sif_i= read.delim( paste0(path_file_sif,i,'.sif'), 
+                          row.names = NULL,
+                          sep = ' ', 
+                          col.names = c('IDA','EFFECT','IDB')) -> signor_ppi_random
+  
+  ## for each random network, perform a CONNECT search for the SFARI genes
+  signor_ppi_random %>%
+    filter (IDA %in% sfari$gene.name & IDB %in% sfari$gene.name ) -> signor_ppi_random_SFARI
+  
+  signor_ppi_random_SFARI <- signor_ppi_random_SFARI %>% select(IDA,IDB, EFFECT)
+  
+  signor_random = graph_from_data_frame(signor_ppi_random_SFARI, directed = TRUE)
+  
+  signor_random= igraph::simplify(signor_random, remove.multiple = TRUE, edge.attr.comb = 'first')
+  
+  metrics_random <- metrics_all (signor_random, paste0('random',i) , sfari$gene.name)
+  
+  metrics_random_tot_signor <- rbind(metrics_random_tot_signor, metrics_random )
+  # print(calculate_JI(graph_signor_SFARI,signor_random))
+
+
+}
+
+## write results 
+write_delim(metrics_random_tot_signor, 'results_CONNECT_analysis/metrics_random_signor_SFARI.txt', delim='\t', col_names = T)
+
+## use t test to measure p-value (SFAI connectivity in SIGNOR vs SFARI connectivity in 1000 null networks)
+metrics_random_tot_signor %>%
+  summarise(av.connectivity = mean(Edges), 
+            sd=sd(Edges)
+            )-> stats.signor.random 
+
+stats.signor.random$SFARI.connectivity <- metrics_signor$Edges
+ 
+stats.signor.random$t <- (stats.signor.random$SFARI.connectivity-stats.signor.random$av.connectivity)/stats.signor.random$sd
+#
+stats.signor.random$pvalue <- pnorm(stats.signor.random$t, lower.tail = FALSE)
+
+
+View(stats.signor.random)
+
+
+```
+
+
+
+### community detection in CONNECT network, using RandomWalk and KEGG enrichment
+
+```{r bins.per.pair}
+
+## perform community detection analysis using Walktrap method (Random Walk)
+## in the CONNECT network
+
+walktrap.community(graph_signor_SFARI, weights = E(graph_signor_SFARI)$weight, steps = 4, merges =
+                     TRUE, modularity = FALSE)-> communities_connect
+
+##analyse community results
+n = 1
+
+for (i in c(1:length(communities_connect))){
+  
+  ## select communities with more than 7 members
+  
+  if (length(communities_connect[[i]]) > 7){
+    
+    ## create a subnetwork to visualize it in Cytoscape
+    induced.subgraph(graph_signor_SFARI, vids = communities_connect[[i]])-> g_i
+    ## uncomment to visualize communities in Cytoscape
+    # createNetworkFromIgraph(
+    #   g_i,
+    #   title = paste0("connect, comunity ", n),
+    #   collection = "My Igraph Network Collection - R, CONNECT, RandomWalk")
+
+## Perform KEGG or GO:BP analysis with gprofiler of each community
+    go_result <- gost(query = as.vector(communities_connect[[i]]),
+                      organism = 'hsapiens',
+                      multi_query = FALSE,
+                      ordered_query = FALSE,
+                      significant = TRUE,
+                      exclude_iea = TRUE,
+                      user_threshold = 0.05,
+                      evcodes = FALSE,
+                      correction_method = 'bonferroni',
+                      sources = c('GO:BP', 'KEGG'))
+ 
+    ## Assemble together the results   
+    result_i <- go_result$result
+    
+    result_i$query <- paste0('community_', n)
+    
+    community_i = data.frame('community_num' = paste0('community_', n), 
+                             'community_members' = paste0(as.vector(communities_connect[[i]]),
+                               collapse = ', '))
+    
+    if(!exists('whole_results')){
+      whole_results_communities <- community_i
+      whole_results <- result_i
+      
+    }else{
+      
+      whole_results <- bind_rows(whole_results, result_i)
+      whole_results_communities <- bind_rows(whole_results_communities, community_i)
+      
+    }
+    n = n+1
+  } 
+  
+}
+
+## clean the results table
+whole_results%>%
+  dplyr::select(-parents)-> whole_results 
+
+whole_results%>%
+  group_by(term_name)%>%
+  summarise(n=n())-> whole_results_summarized
+
+whole_results[is.na(whole_results)] <- '-'
+
+whole_results[is.null(whole_results)] <- '-'
+
+writexl::write_xlsx(as.data.frame(whole_results), 
+           'results_CONNECT_analysis/Supplementary_Table1_GO_KEGG_ORA_COMMUNITIES.xlsx')
+
+whole_results <- NULL
+whole_results_communities <- NULL
+
+```
+

@@ -1,0 +1,265 @@
+---
+title: "DDI analysis over signor network "
+author: "Livia Perfetto"
+date: "08/08/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+#### Libraries
+```{r message=FALSE,warning=FALSE}
+library(RCy3)
+library(igraph)
+library(data.table)
+library(httr) 
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(tidyverse)
+library(xlsx)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+
+### define script functions
+```{r bins.per.pair}
+
+`%notin%` <- Negate(`%in%`) 
+
+
+#retrieve_edges_connect_add_bridge takes as input signor dataframe and a list of input proteins and retrieve all the edges in the connect + first neigh mode
+retrieve_edges_connect_add_bridge <- function(input_proteins){
+ 
+   ## the function perform a query in SIGNOR using API and connection method level 2 (First neighbours)
+  signor_FN_query <-
+  paste0('https://signor.uniroma2.it/getData.php?type=connect&proteins=',
+         paste0(input_proteins, collapse = '%2C'),
+                '&level=2')
+  
+  signor_FN <- as.data.frame(fread(signor_FN_query))
+  
+  ##for the network it retrieves a list of edge names (defined as regulator -> target)
+ 
+  signor_FN$edge_key <- paste0 (signor_FN$V1, '|', signor_FN$V5)
+  
+  edge_names <- list(signor_FN$edge_key )
+  
+  return(edge_names)
+  
+}
+
+
+retrieve_nodes_connect_add_bridge <- function(input_proteins){
+  
+  ## the function perform a query in SIGNOR using API and connection method level 2 (First neighbours)
+  signor_FN_query <-
+  paste0('https://signor.uniroma2.it/getData.php?type=connect&proteins=',
+         paste0(input_proteins, collapse = '%2C'),
+                '&level=2')
+  
+  signor_FN <- as.data.frame(fread(signor_FN_query))
+  
+  signor_FN$edge_key <- paste0 (signor_FN$V1, '|', signor_FN$V5)
+  
+  ##for the network it retrieves a list of node names
+  nodes_names <- list(unique(signor_FN$V1, signor_FN$V5))
+  
+  return(nodes_names)
+  
+}
+
+
+##create_matrix function takes a list of lists and generate a matrix of intersections
+
+create_matrix <- function(l){sapply(seq_len(length(l)), function(x) ## where l = list of lists
+  
+  sapply(seq_len(length(l)), function(y) length(intersect(unlist(l[x]), unlist(l[y])))))}
+
+
+```
+
+### import SIGNOR data
+
+```{r bins.per.pair, echo = FALSE,warning=FALSE}
+###get network from signor
+
+# Signor Relation reading
+signor = as.data.frame(fread(paste0('https://signor.uniroma2.it/getDataInternal.php?&localization&organism=9606'), header=TRUE))
+
+
+```
+
+###START ANALYSIS IN THE CONTEXT OF NEURO
+
+
+### extract datasets to analyse, NDD as defined by PMCI and ASC
+```{r bins.per.pair}
+
+##import NDD genes curated by the PCMI (Willsey et al, 2018, https://www.cell.com/cell/pdf/S0092-8674(18)30784-0.pdf)
+
+read_xlsx('input_tables/all_NDD.xlsx', 
+          sheet = 1, range = NULL, 
+          col_names = TRUE,
+          col_types = NULL, 
+          na = "", 
+          trim_ws = TRUE, 
+          skip = 0,
+          progress = readxl_progress(), .name_repair = "unique")-> NDD
+
+
+NDD%>%
+  filter(Disease == 'ASD') -> ASD
+NDD%>%
+  filter(Disease == 'EE') -> EE
+NDD%>%
+  filter(Disease == 'ID') -> ID
+NDD%>%
+  filter(Disease == 'SCZ') -> SCZ
+
+## extract independent ASC list of ASD genes
+
+ASC_file = 'input_tables/ASC_gene_results'
+
+read.csv(ASC_file, header = T, sep = '\t') -> ASC
+
+ASC %>%
+  filter(grepl('ENS', gene_id) & qval < 0.05) -> ASC
+
+ASC$SYMBOL <- AnnotationDbi::mapIds(org.Hs.eg.db, 
+                      keys = ASC$gene_id,
+                      keytype = 'ENSEMBL',
+                      column = 'SYMBOL')
+
+```
+
+## define names of the comparison
+```{r bins.per.pair, echo = FALSE,warning=FALSE}
+
+PCMI_names <- c('PCMI-ASD','ASC-ASD', 'PCMI-SCZ','PCMI-EE','PCMI-ID')
+# ASC_names <- c('ASC-ASD','PCMI-SCZ','PCMI-EE','PCMI-ID')
+
+```
+
+
+### create subnetworks of SIGNOR, for specific lists
+## ASD genes source: PCMI
+## edge type: common genes
+```{r bins.per.pair}
+
+setwd('~/Desktop/neuro/PAPER/analysis_resubmission/DDI_analysis/')
+
+ASD_list_PCMI <- list(ASD$Gene)
+ASD_list_ASC <- list(ASC$SYMBOL)
+SCZ_list_PCMI <- list(SCZ$Gene)
+ID_list_PCMI <- list(ID$Gene)
+EE_list_PCMI <- list(EE$Gene)
+
+list_of_lists <- list(ASD_list_PCMI,
+                      ASD_list_ASC,
+                      SCZ_list_PCMI,
+                      EE_list_PCMI,
+                      ID_list_PCMI)
+
+
+create_matrix (list_of_lists) -> matrix_of_intersection_genes_ASD_PCMI
+
+row.names(matrix_of_intersection_genes_ASD_PCMI) <- PCMI_names
+colnames(matrix_of_intersection_genes_ASD_PCMI) <- PCMI_names
+matrix_of_intersection_genes_ASD_PCMI
+
+## create a DDI from the comparison matrix 
+graph_from_adjacency_matrix(matrix_of_intersection_genes_ASD_PCMI,
+                            mode = "undirected",
+                            weighted = T) -> graph_genes_ASD_PCMI
+
+graph_genes_ASD_PCMI <- igraph::simplify(graph_genes_ASD_PCMI, remove.loops = T)
+
+createNetworkFromIgraph(
+  graph_genes_ASD_PCMI,
+  title = paste0("ASD genes source: ALL, edge type: shared genes"),
+  collection = "DDI analysis")
+
+```
+
+### create subnetworks of SIGNOR, for specific lists
+## ASD genes source: PCMI
+## edge type: common edges
+```{r bins.per.pair}
+
+ASD_list_PCMI_edge <- retrieve_edges_connect_add_bridge(ASD$Gene)
+ASD_list_ASC_edge <- retrieve_edges_connect_add_bridge(ASC$SYMBOL)
+
+# SCZ_list_PCMI_edge  <- retrieve_edges_connect_add_bridge(SCZ$Gene)
+SCZ_list_PCMI_edge <- list()
+ID_list_PCMI_edge  <- retrieve_edges_connect_add_bridge(ID$Gene)
+EE_list_PCMI_edge  <- retrieve_edges_connect_add_bridge(EE$Gene)
+
+list_of_lists <- list(ASD_list_PCMI_edge ,
+                      ASD_list_ASC_edge ,
+                      SCZ_list_PCMI_edge ,
+                      EE_list_PCMI_edge ,
+                      ID_list_PCMI_edge )
+
+
+create_matrix (list_of_lists) -> matrix_of_intersection_edges_ASD_PCMI
+
+row.names(matrix_of_intersection_edges_ASD_PCMI) <- PCMI_names
+colnames(matrix_of_intersection_edges_ASD_PCMI) <- PCMI_names
+matrix_of_intersection_edges_ASD_PCMI
+
+## create a DDI from the comparison matrix 
+graph_from_adjacency_matrix(matrix_of_intersection_edges_ASD_PCMI,
+                            mode = "undirected",
+                            weighted = T) -> graph_genes_ASD_PCMI
+
+graph_genes_ASD_PCMI <- igraph::simplify(graph_genes_ASD_PCMI, remove.loops = T)
+
+createNetworkFromIgraph(
+  graph_genes_ASD_PCMI,
+  title = paste0("ASD genes source: ALL, edge type: shared edges"),
+  collection = "DDI analysis")
+```
+### create subnetworks of SIGNOR, for specific lists
+## ASD genes source: PCMI
+## edge type: common edges
+```{r bins.per.pair}
+
+ASD_list_PCMI_node <- retrieve_nodes_connect_add_bridge(ASD$Gene)
+ASD_list_ASC_node  <- retrieve_nodes_connect_add_bridge(ASC$SYMBOL)
+
+#SCZ_list_PCMI_node <- retrieve_nodes_connect_add_bridge(SCZ$Gene)
+SCZ_list_PCMI_node  <- list()
+ID_list_PCMI_node  <- retrieve_nodes_connect_add_bridge(ID$Gene)
+EE_list_PCMI_node  <- retrieve_nodes_connect_add_bridge(EE$Gene)
+
+list_of_lists <- list(ASD_list_PCMI_node ,
+                      ASD_list_ASC_node,
+                      SCZ_list_PCMI_node ,
+                      EE_list_PCMI_node,
+                      ID_list_PCMI_node)
+
+
+create_matrix (list_of_lists) -> matrix_of_intersection_nodes_ASD_PCMI
+
+row.names(matrix_of_intersection_nodes_ASD_PCMI) <- PCMI_names
+colnames(matrix_of_intersection_nodes_ASD_PCMI) <- PCMI_names
+matrix_of_intersection_nodes_ASD_PCMI
+
+## create a DDI from the comparison matrix 
+graph_from_adjacency_matrix(matrix_of_intersection_nodes_ASD_PCMI,
+                            mode = "undirected",
+                            weighted = T) -> graph_nodes_ASD_PCMI
+
+graph_nodes_ASD_PCMI <- igraph::simplify(graph_nodes_ASD_PCMI, remove.loops = T)
+
+createNetworkFromIgraph(
+  graph_nodes_ASD_PCMI,
+  title = paste0("ASD genes source: ALL, edge type: shared nodes"),
+  collection = "DDI analysis")
+```
+
+```
